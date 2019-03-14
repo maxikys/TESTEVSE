@@ -1,0 +1,204 @@
+//
+// pwm.c STM32F4Discovery
+//
+
+#include "pwm.h"
+#include "gpio.h"
+#include "clock.h"
+#include <stm32f4xx.h>
+
+// TODO: добавить включение вывода для TIM1/TIM8!
+
+// Разрешение: 15 бит
+#define RESOLUTION  15
+
+// Частота ШИМ: 600 Гц
+#define FREQUENCY   600
+
+// Описание канала вывода таймера
+typedef struct
+{
+    TIM_TypeDef *       TIM;     // Таймер
+    int                 Channel; // Канал таймера
+    bool                Advanced; // С поддержкой управления двигателем? (требует дополнительных телодвижений)
+    
+    uint32_t            RCCRegMask; // Маска для управления тактированием
+    volatile uint32_t * RCCReg;     // Адрес регистра управления тактированием
+    
+    uint8_t             AlternateFunction; // Номер альтернативной функции
+    TPin                Pin;               // Вывод
+} TChannel;
+
+// Для таймеров 1,2 - 1, для таймеров 3-5 - 2, для таймеров 8-11 - 3, для таймеров12-14 - 9
+// Таблица с настройками ШИМ (можно вписать иные конфигурации с альтернативным маппингом
+static const TChannel Channels[] = {
+                                    {  TIM1, 1,  true,  RCC_APB2ENR_TIM1EN, &RCC->APB2ENR, 1, {PA,  8} }, // PA8  - TIM1_CH1
+                                    {  TIM1, 2,  true,  RCC_APB2ENR_TIM1EN, &RCC->APB2ENR, 1, {PA,  9} }, // PA9  - TIM1_CH2
+                                    {  TIM1, 3,  true,  RCC_APB2ENR_TIM1EN, &RCC->APB2ENR, 1, {PA, 10} }, // PA10 - TIM1_CH3
+                                    {  TIM1, 4,  true,  RCC_APB2ENR_TIM1EN, &RCC->APB2ENR, 1, {PA, 11} }, // PA11 - TIM1_CH4
+
+                                    {  TIM2, 1, false,  RCC_APB1ENR_TIM2EN, &RCC->APB1ENR, 1, {PA, 15} }, // PA15 - TIM2_CH1
+                                    {  TIM2, 2, false,  RCC_APB1ENR_TIM2EN, &RCC->APB1ENR, 1, {PB,  3} }, // PB3  - TIM2_CH2 (TRACESWO!)
+                                    {  TIM2, 3, false,  RCC_APB1ENR_TIM2EN, &RCC->APB1ENR, 1, {PB, 10} }, // PB10 - TIM2_CH3
+                                    {  TIM2, 4, false,  RCC_APB1ENR_TIM2EN, &RCC->APB1ENR, 1, {PB, 11} }, // PB11 - TIM2_CH4
+ 
+                                    {  TIM3, 1, false,  RCC_APB1ENR_TIM3EN, &RCC->APB1ENR, 2, {PB,  4} }, // PB4  - TIM3_CH1
+                                    {  TIM3, 2, false,  RCC_APB1ENR_TIM3EN, &RCC->APB1ENR, 2, {PB,  5} }, // PB5  - TIM3_CH2
+                                    {  TIM3, 3, false,  RCC_APB1ENR_TIM3EN, &RCC->APB1ENR, 2, {PB,  0} }, // PB0  - TIM3_CH3
+                                    {  TIM3, 4, false,  RCC_APB1ENR_TIM3EN, &RCC->APB1ENR, 2, {PB,  1} }, // PB1  - TIM3_CH4
+
+                                    {  TIM4, 1, false,  RCC_APB1ENR_TIM4EN, &RCC->APB1ENR, 2, {PD, 12} }, // PD12 - TIM4_CH1 (led)
+                                    {  TIM4, 2, false,  RCC_APB1ENR_TIM4EN, &RCC->APB1ENR, 2, {PD, 13} }, // PD13 - TIM4_CH2 (led)
+                                    {  TIM4, 3, false,  RCC_APB1ENR_TIM4EN, &RCC->APB1ENR, 2, {PD, 14} }, // PD14 - TIM4_CH3 (led)
+                                    {  TIM4, 4, false,  RCC_APB1ENR_TIM4EN, &RCC->APB1ENR, 2, {PD, 15} }, // PD15 - TIM4_CH4 (led)
+
+                                    {  TIM5, 1, false,  RCC_APB1ENR_TIM5EN, &RCC->APB1ENR, 2, {PA,  0} }, // PA0  - TIM5_CH1
+                                    {  TIM5, 2, false,  RCC_APB1ENR_TIM5EN, &RCC->APB1ENR, 2, {PA,  1} }, // PA1  - TIM5_CH2
+                                    {  TIM5, 3, false,  RCC_APB1ENR_TIM5EN, &RCC->APB1ENR, 2, {PA,  2} }, // PA2  - TIM5_CH3
+                                    {  TIM5, 4, false,  RCC_APB1ENR_TIM5EN, &RCC->APB1ENR, 2, {PA,  3} }, // PA3  - TIM5_CH4
+
+                                    {  TIM8, 1,  true,  RCC_APB2ENR_TIM8EN, &RCC->APB2ENR, 3, {PC,  6} }, // PС6  - TIM8_CH1
+                                    {  TIM8, 2,  true,  RCC_APB2ENR_TIM8EN, &RCC->APB2ENR, 3, {PC,  7} }, // PС7  - TIM8_CH2
+                                    {  TIM8, 3,  true,  RCC_APB2ENR_TIM8EN, &RCC->APB2ENR, 3, {PC,  8} }, // PС8  - TIM8_CH3
+                                    {  TIM8, 4,  true,  RCC_APB2ENR_TIM8EN, &RCC->APB2ENR, 3, {PC,  9} }, // PС9  - TIM8_CH4
+                                    
+                                    {  TIM9, 1, false,  RCC_APB2ENR_TIM9EN, &RCC->APB2ENR, 3, {PE,  5} }, // PE5  - TIM9_CH1 (TRACE DATA!)
+                                    {  TIM9, 2, false,  RCC_APB2ENR_TIM9EN, &RCC->APB2ENR, 3, {PE,  6} }, // PE6  - TIM9_CH2 (TRACE DATA!)
+                                                                        
+                                    { TIM10, 1, false, RCC_APB2ENR_TIM10EN, &RCC->APB2ENR, 3, {PB,  8} }, // PB8  - TIM10_CH1
+                                    
+                                    { TIM11, 1, false, RCC_APB2ENR_TIM11EN, &RCC->APB2ENR, 3, {PB,  9} }, // PB9  - TIM11_CH1
+                                    
+                                    { TIM12, 1, false, RCC_APB1ENR_TIM12EN, &RCC->APB1ENR, 9, {PB, 14} }, // PB14 - TIM12_CH1
+                                    { TIM12, 2, false, RCC_APB1ENR_TIM12EN, &RCC->APB1ENR, 9, {PB, 15} }, // PB15 - TIM12_CH2
+                                    
+                                    { TIM13, 1, false, RCC_APB1ENR_TIM13EN, &RCC->APB1ENR, 9, {PA,  6} }, // PA6  - TIM13_CH1
+                                    { TIM14, 1, false, RCC_APB1ENR_TIM14EN, &RCC->APB1ENR, 9, {PA,  7} }, // PA7  - TIM14_CH1
+};
+
+// количество каналов
+static const int ChannelCount = sizeof(Channels) / sizeof(Channels[0]);
+
+// Инициализировать таймер под ШИМ
+static void pwm_InitTimer(const TChannel * Channel)
+{
+    uint32_t Clock = clock_GetAPB1(); // Частота шины
+    uint32_t Counts = (1UL << RESOLUTION);
+    
+    // Включить тактирование модуля
+    *Channel->RCCReg |= Channel->RCCRegMask;
+    
+    // Разрядность: 16 бит
+    Channel->TIM->ARR = Counts - 1;
+    
+    // Предделитель:
+    Channel->TIM->PSC = (Clock / FREQUENCY / Counts) - 1;
+    
+    // Включить счёт
+    Channel->TIM->CR1 |= TIM_CR1_CEN;
+
+    if(Channel->Advanced)
+    {
+        // Разрешить выход
+        Channel->TIM->BDTR |= TIM_BDTR_MOE;
+    }
+}
+
+// Установка значения регистра сравнения
+static void pwm_SetValue(const TChannel * Channel, uint16_t Value)
+{
+    switch(Channel->Channel)
+    {
+    case 1: Channel->TIM->CCR1 = Value; break;
+    case 2: Channel->TIM->CCR2 = Value; break;
+    case 3: Channel->TIM->CCR3 = Value; break;
+    case 4: Channel->TIM->CCR4 = Value; break;
+    }
+}
+
+// Инициализация вывода ШИМ
+static void pwm_InitChannel(const TChannel * Channel)
+{
+    // Выберем альтернативную функцию вывода
+    gpio_SetAlternateFunction(&Channel->Pin, Channel->AlternateFunction);
+    
+    // Выключить счёт на время настройки
+    Channel->TIM->CR1 &= ~TIM_CR1_CEN;
+    
+    switch(Channel->Channel)
+    {
+    case 1:
+        // Режим: ШИМ1 0b110
+        Channel->TIM->CCMR1 &= ~TIM_CCMR1_OC1M;  // очистим поле режима
+        Channel->TIM->CCMR1 |= (TIM_CCMR1_OC1M_2 | TIM_CCMR1_OC1M_1); // Запишем 0b110
+        
+        // Канал 1 включить
+        Channel->TIM->CCER |= TIM_CCER_CC1E;
+        break;
+    case 2:
+        // Режим: ШИМ1 0b110
+        Channel->TIM->CCMR1 &= ~TIM_CCMR1_OC2M;  // очистим поле режима
+        Channel->TIM->CCMR1 |= (TIM_CCMR1_OC2M_2 | TIM_CCMR1_OC2M_1); // Запишем 0b110
+        
+        // Канал 2 включить
+        Channel->TIM->CCER |= TIM_CCER_CC2E;
+        break;
+    case 3:
+        // Режим: ШИМ1 0b110
+        Channel->TIM->CCMR2 &= ~TIM_CCMR2_OC3M;  // очистим поле режима
+        Channel->TIM->CCMR2 |= (TIM_CCMR2_OC3M_2 | TIM_CCMR2_OC3M_1); // Запишем 0b110
+        
+        // Канал 3 включить
+        Channel->TIM->CCER |= TIM_CCER_CC3E;
+        break;
+    case 4:
+        // Режим: ШИМ1 0b110
+        Channel->TIM->CCMR2 &= ~TIM_CCMR2_OC4M;  // очистим поле режима
+        Channel->TIM->CCMR2 |= (TIM_CCMR2_OC4M_2 | TIM_CCMR2_OC4M_1); // Запишем 0b110
+        
+        // Канал 4 включить
+        Channel->TIM->CCER |= TIM_CCER_CC4E;
+        break;
+    }
+    
+    // Обнулим вывод
+    pwm_SetValue(Channel, 0);
+    
+    // Передадим сигнал о сбросе счётчика, чтоб все внутренние регистры точно обновились.
+    Channel->TIM->EGR = TIM_EGR_UG;
+    
+    // Включить счёт
+    Channel->TIM->CR1 |= TIM_CR1_CEN;
+}
+
+// Запись о канале
+static const TChannel * pwm_GetChannel(int Channel)
+{
+    if (Channel >= ChannelCount) return 0;
+    
+    return &Channels[Channel];
+}
+
+// Настроить канал
+void pwm_Init(int Channel)
+{
+    const TChannel * C = pwm_GetChannel(Channel);
+    if(!C) return;
+    
+    // Настроим
+    pwm_InitTimer(C);
+    pwm_InitChannel(C);
+}
+
+// Задать скважность (0-0xFFFF)
+void pwm_Set(int Channel, uint16_t Value)
+{
+    // Приведём к нужному разрешению
+    uint16_t ScaledValue = Value >> (16 - RESOLUTION);
+    
+    const TChannel * C = pwm_GetChannel(Channel);
+    if(!C) return;
+    
+    // Установим величину
+    pwm_SetValue(C, ScaledValue);
+}
