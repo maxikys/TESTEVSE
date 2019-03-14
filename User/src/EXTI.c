@@ -76,6 +76,8 @@ void EXTI0_1_IRQHandler(void)
      EXTI->PR |= 0x0001;
     for(t = 0; t < 25; t++){}                                                       // Задержка для устранения затягивания фронта
     ADC1->CR |= ADC_CR_ADSTART;                                                     // Включаем преобразование
+    Temp = ADC1->DR;
+    Temp = 0;
     for (i = 0; i < CountofChannel; i++)                                            // В цикле опрашиваем каналы
     {
       while ((ADC1->ISR & ADC_ISR_EOC) == 0 && Temp <= 10000)                       // Ожидаем флаг окончания преобразования
@@ -85,7 +87,7 @@ void EXTI0_1_IRQHandler(void)
       ADC_Result[i] = ADC1->DR;                                                     // Сохраняем значения в буфере
     }
     
-    MassV0[Index] = ADC_Result[0]*3300/(( 1 << 12 ) - 1);                           // пересчитываем значения напряжения с канала 1
+    MassV0[Index] = ADC_Result[0];                                                  // пересчитываем значения напряжения с канала 1
 
     if(Index < SizeArray - 1)                                                       // проверка за выскакивание из диапазона
     {
@@ -106,11 +108,9 @@ void EXTI0_1_IRQHandler(void)
       EXTI_set(EXTI_Trig_PT.IRQ, Off);                                              // запрещаем прерывание от измерителя пилот тона
       EXTI_set(EXTI_Trig_Valtage.IRQ, On);                                          // разрешаем прерывание по захвату фазы А
       CurentState.status = PilotMeasureDone;                                        // пилот тон померяли
-      //ADC1->CR |= ADC_CR_ADDIS;
-      
+
       ADC_SelectChannel(AN1,On);
       ADC_SelectChannel(AN0,Off);
-      
       TogglePin(&C8);
     }
   }
